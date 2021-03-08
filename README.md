@@ -6,7 +6,7 @@ In more details, the training will be performed on an Nvidia V100 GPU running wi
 
 # Abstract
 
-Training of deep Neural networks is considered a time-consuming and computationally intensive task that demands extra high computational resources taking many days. Therefore, it is our interest to reduce the complexity of the training process. We adopted a super-convergence learning rate policy, and mixed-precision training algorithm to accelerate the training phase. We referred to existing work (David Page 2018) and fine-tuned hyperparameters to maximize the validation accuracy under the condition that only training in 5000 sampling samples.
+Training of deep Neural networks is considered a time-consuming and computationally intensive task that demands extra high computational resources taking many days. Therefore, it is our interest to reduce the complexity of the training process. We adopted a super-convergence learning rate policy, and mixed-precision training algorithm to accelerate the training phase. We referred to existing work (David Page 2018 https://github.com/davidcpage/cifar10-fast) and fine-tuned hyperparameters to maximize the validation accuracy under the condition that only training in 5000 sampling samples.
 
 # Instructions to run our code:
 
