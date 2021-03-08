@@ -1,0 +1,6 @@
+pandas==1.1.2
+torch==1.6.0
+numpy==1.19.1
+torchvision==0.7.0
+pydot==1.4.2
+tensorflow==2.4.1

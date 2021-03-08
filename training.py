@@ -1,118 +1,96 @@
-'''Train CIFAR10 with PyTorch.'''
+
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import torch.backends.cudnn as cudnn
-
-import torchvision
-import torchvision.transforms as transforms
-
+import sys
 import os
-import argparse
+from utils import *
+import os.path
+import torchvision
 
+total_class = 10
 
-from utils import progress_bar
+# load data 
+def Data_load(root='./data'):
+  # CIFAR10
+  download = lambda train: torchvision.datasets.CIFAR10(root=root, train=train, download=True)
+  return {k: {'data': v.data, 'targets': v.targets} for k,v in [('train', download(train=True)), ('valid', download(train=False))]}
 
+data_sampled = Data_load('./data')
 
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
-parser.add_argument('--net_sav', default='./checkpoint/ckpt.pth', type=str, help='network save file')
-args = parser.parse_args()
+# calculate mean and std of data
+data_mean = np.mean(data_sampled['train']['data'], axis=(0,1,2))
+data_std = np.std(data_sampled['train']['data'], axis=(0,1,2))
+print (data_mean,data_std)
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+batch_norm = partial(GhostBatchNorm, num_splits=4, weight_freeze=True)
+relu = partial(nn.CELU, alpha=0.3)
 
-# Data
-print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
-trainset = torchvision.datasets.CIFAR10(
-    root='./data', train=True, download=True, transform=transform_train)
-trainloader = torch.utils.data.DataLoader(
-    trainset, batch_size=128, shuffle=True, num_workers=2)
-
-testset = torchvision.datasets.CIFAR10(
-    root='./data', train=False, download=True, transform=transform_test)
-testloader = torch.utils.data.DataLoader(
-    testset, batch_size=100, shuffle=False, num_workers=2)
-
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
-
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
-net = Net()#Define your network here
-net = net.to(device)
-if device == 'cuda':
-    net = torch.nn.DataParallel(net)
-    cudnn.benchmark = True
-
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=args.lr,
-                      momentum=0.9, weight_decay=5e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
-
-
-# Training
-def train(epoch):
-    print('\nEpoch: %d' % epoch)
-    net.train()
-    train_loss = 0
-    correct = 0
-    total = 0
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = net(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-
-        train_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
-        acc = 100.*correct/total
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                     % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-        state = {
-            'net': net.state_dict(),
-            'acc': acc,
-            'epoch': epoch,
-        }
-        torch.save(state, args.net_sav)
+def conv_bn(c_in, c_out, pool=None):
+    block = {
+        'conv': nn.Conv2d(c_in, c_out, kernel_size=3, stride=1, padding=1, bias=False), 
+        'bn': batch_norm(c_out), 
+        'relu': relu(),
+    }
+    if pool: block = {'conv': block['conv'], 'pool': pool, 'bn': block['bn'], 'relu': block['relu']}
+    return block
 
 
 
-    
+print('Downloading datasets')
+dataset = map_nested(torch.tensor, data_sampled)
+
+## if training sample = 5000, the following setting gives best result (87%acc)
+epochs, ema_epochs = 60, 10
+lr_schedule = PiecewiseLinear([0, 12, epochs-ema_epochs], [0, 1.0, 1e-4])
+batch_size = 128
+float_size = torch.float16
+
+# data_augmentation
+train_transforms = [Crop(32, 32), FlipLR()]
+loss = label_smoothing_loss(0.2)
+
+print('Starting timer')
+timer = Timer(synch=torch.cuda.synchronize)
+
+print('Preprocessing training data')
+dataset = map_nested(to(device), dataset)
+T = lambda x: torch.tensor(x, dtype=float_size, device=device)
+
+transforms = [
+    to(dtype=float_size),
+    partial(normalise, mean=T(data_mean), std=T(data_std)),
+    partial(transpose, source='NHWC', target='NCHW'), 
+]
 
 
-for epoch in range(start_epoch, start_epoch+200):
-    train(epoch)
-    scheduler.step()
+train_set = preprocess(dataset['train'], transforms + [partial(pad, border=4)])
+print(f'Finished in {timer():.2} seconds')
+print(train_set['data'].shape[0], ' train imgs')
+
+
+# create network
+model = Network(net(weight=1/16, conv_bn=conv_bn, prep=conv_bn, total_class=total_class)).to(device).half()
+
+train_batches = GPUBatches(batch_size=batch_size, transforms=train_transforms, dataset=train_set, shuffle=True,  drop_last=False, max_options=200)
+
+is_bias = group_by_key(('bias' in k, v) for k, v in trainable_params(model).items())
+opts = [
+    SGD(is_bias[False], {'lr': (lambda step: lr_schedule(step/len(train_batches))/batch_size), 'weight_decay': Const(5e-4*batch_size), 'momentum': Const(0.9)}),
+    SGD(is_bias[True], {'lr': (lambda step: lr_schedule(step/len(train_batches))*(64/batch_size)), 'weight_decay': Const(5e-4*batch_size/64), 'momentum': Const(0.9)})
+]
+
+
+## training
+logs_train, state = Table(), {MODEL: model, VALID_MODEL: copy.deepcopy(model), LOSS: loss, OPTS: opts}
+default_train_steps = (forward(training_mode=True), log_activations(('loss', 'acc')), backward(), opt_steps)
+for epoch in range(epochs):
+    logs_train.append(union({'epoch': epoch+1}, train_epoch_new(state, timer, train_batches,
+                                                          train_steps=(*default_train_steps, update_ema(momentum=0.99, update_freq=5))
+                                                         )))
+      
+
+## save network
+net_save = 'HAET_model.pt'
+state = {'net': model.state_dict()}
+torch.save(state, net_save)
+print ("Save network!")
 
